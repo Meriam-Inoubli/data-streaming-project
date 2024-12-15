@@ -8,24 +8,26 @@ import threading
 import queue
 import pandas as pd
 from collections import deque
-import time
 
 # Initialize the Dash application
 app = dash.Dash(__name__)
 
-# Queue to store the latest  data
+# Queue to store the latest data
 data_queue = queue.Queue()
 
 # Global variables to store the latest price and order book data received from Kafka
 latest_price_data = {}
 latest_order_book_data = {}
 
-# Structures 
-price_window = {symbol: deque(maxlen=10) for symbol in latest_price_data}
-order_book_window = {symbol: deque(maxlen=10) for symbol in latest_order_book_data}
+# Structures to store the latest data for each symbol
+price_window = {}
+order_book_window = {}
 
-# Function to consume messages
+# Function to consume messages from Kafka
+# Function to consume messages from Kafka
 def consume_kafka_data():
+    global price_window, order_book_window
+
     consumer = KafkaConsumer(
         'stock-data',  # Kafka topic
         bootstrap_servers='localhost:9092',  # Kafka server address
@@ -37,10 +39,17 @@ def consume_kafka_data():
         data = message.value
         symbol = data.get('symbol')
 
+        # Initialize the price and order book windows if it's the first time receiving data for a symbol
+        if symbol not in price_window:
+            price_window[symbol] = deque(maxlen=10)
+        if symbol not in order_book_window:
+            order_book_window[symbol] = deque(maxlen=10)
+
         # Update the latest price data for the symbol
         if 'price' in data:
-            price_window[symbol].append(data['price'])  
-            latest_price_data[symbol] = data['price']  
+            price = float(data['price'])  
+            price_window[symbol].append(price)  
+            latest_price_data[symbol] = price  
 
         # Update the order book data for the symbol
         if 'order_book' in data:
@@ -50,10 +59,12 @@ def consume_kafka_data():
         # Put the data into the queue for Dash to use
         data_queue.put((latest_price_data.copy(), latest_order_book_data.copy())) 
 
+
 # Start a thread to consume Kafka data
 def start_kafka_thread():
     kafka_thread = threading.Thread(target=consume_kafka_data)
     kafka_thread.daemon = True  
+    kafka_thread.start()
 
 # Function to generate the price graph (average price over the last 10 minutes)
 def generate_price_graph():
@@ -70,10 +81,32 @@ def generate_price_graph():
     )
 
 # Function to generate the order book graph (max bid and ask)
+# Function to generate the order book graph (max bid and ask)
 def generate_order_book_graph():
     symbols = list(latest_order_book_data.keys())
-    bids = [max([bid[0] for bid in order['bids']]) for order in latest_order_book_data.values()]
-    asks = [max([ask[0] for ask in order['asks']]) for order in latest_order_book_data.values()]
+
+    # Initialize lists for bids and asks
+    bids = []
+    asks = []
+
+    # Loop over all symbols and extract the max bid and ask
+    for symbol in symbols:
+        order = latest_order_book_data.get(symbol, {})
+        
+        if 'bids' in order and order['bids']:
+            bids.append(max([bid[0] for bid in order['bids']]))  # Max bid
+        else:
+            bids.append(0)  # No bids, append 0
+
+        if 'asks' in order and order['asks']:
+            asks.append(max([ask[0] for ask in order['asks']]))  # Max ask
+        else:
+            asks.append(0)  # No asks, append 0
+
+    # Check if bids and asks have been populated correctly
+    print(f"Symbols: {symbols}")
+    print(f"Bids: {bids}")
+    print(f"Asks: {asks}")
 
     return go.Figure(
         data=[
@@ -81,11 +114,12 @@ def generate_order_book_graph():
             go.Bar(x=symbols, y=asks, name='Asks', marker={'color': 'red'})
         ],
         layout=go.Layout(
-            title='Order Book (Max Bid and Ask)',  
+            title='Order Book (Max Bid and Ask)',
             xaxis={'title': 'Symbols'},
             yaxis={'title': 'Volume'}
         )
     )
+
 
 # Configuration of the Dash layout
 app.layout = html.Div([
@@ -95,7 +129,7 @@ app.layout = html.Div([
         dcc.Graph(id='order-book-graph'),
         dcc.Interval(
             id='interval-component',
-            interval=60000,  
+            interval=60000,  # Update every 60 seconds
             n_intervals=0
         )
     ])
